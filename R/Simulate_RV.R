@@ -1,54 +1,62 @@
 #' Simulate logistic normal variables
 #'
-#' @param exp Expected values
-#' @param pars Parameters for a logistic normal (iid == 1 parameter, AR1 == 2 parameters, 2D, by age and sex == 3 parameters, 3D, by age, sex, and region == 4 parameters)
-#' @param comp_like Likelihood structure (iid == 2, ar1 == 3, 2d == 4, 3d == 5)
+#' @param exp Expected proportions (should sum to 1)
+#' @param pars Parameters for a logistic normal:
+#'   - comp_like = 2: pars = c(sigma)
+#'   - comp_like = 3: pars = c(sigma, rho_age)
+#'   - comp_like = 4: pars = c(sigma, rho_age, rho_sex)
+#'   - comp_like = 5: pars = c(sigma, rho_age, rho_sex, rho_region)
+#'    (iid = 1 parameter; AR1 = 2 parameters; 2D, by age and sex = 3 parameters; 3D, by age, sex, and region = 4 parameters)
+#' @param comp_like Likelihood structure (2 = iid, 3 = ar1, 4 = 2d, 5 = 3d)
 #' @importFrom MASS mvrnorm
 #' @keywords internal
 #'
-rlogistnormal <- function(exp,
-                          pars,
-                          comp_like
-                          ) {
-  # set up expected value vector
-  mu <- log(exp[-length(exp)]) # remove last bin since it's known
-  mu <- mu - log(exp[length(exp)]) # calculate log ratio
+rlogistnormal <- function(exp, pars, comp_like) {
 
-  # if iid logistic normal
-  if(comp_like == 2) {
-    Sigma <- diag(length(exp)-1) # set up sigma
-    diag(Sigma) <- pars[1]^2 # input parameter
-  } # end if iid logistic normal
+  # Remove last bin and compute log-ratios
+  mu <- log(exp[-length(exp)]) - log(exp[length(exp)])
 
-  # if logistic normal, AR1 by age
-  if(comp_like == 3) {
-    Sigma <- get_AR1_CorrMat(n_ages, pars[2]) * pars[1]^2
-    Sigma <- Sigma[-nrow(Sigma), -ncol(Sigma)] # remove last row and column
-  } # end if iid logistic normal
+  # Determine covariance structure
+  Sigma <- switch(comp_like,
+                  `2` = diag(pars[1]^2, length(mu)),
 
-  # if logistic normal, AR1 by age, constant correlation by sex
-  if(comp_like == 4) {
-    Sigma <- kronecker(get_AR1_CorrMat(n_ages, pars[2]),
-                       get_Constant_CorrMat(n_sexes, pars[3])) * pars[1]^2
-    Sigma <- Sigma[-nrow(Sigma), -ncol(Sigma)] # remove last row and column
-  }
+                  `3` = {
+                    Sigma_raw <- get_AR1_CorrMat(n_ages, pars[2]) * pars[1]^2
+                    Sigma_raw[-nrow(Sigma_raw), -ncol(Sigma_raw)]
+                  },
 
-  # if logistic normal, AR1 by age, constant correlation by sex and constant correlation by region
-  if(comp_like == 5) {
-    Sigma <- kronecker(kronecker(get_AR1_CorrMat(n_ages, pars[2]), get_Constant_CorrMat(n_sexes, pars[3])),
-                       get_Constant_CorrMat(n_regions, pars[4])) * pars[1]^2
-    Sigma <- Sigma[-nrow(Sigma), -ncol(Sigma)] # remove last row and column
-  }
+                  `4` = {
+                    Sigma_raw <- kronecker(
+                      get_AR1_CorrMat(n_ages, pars[2]),
+                      get_Constant_CorrMat(n_sexes, pars[3])
+                      ) * pars[1]^2
+                    Sigma_raw[-nrow(Sigma_raw), -ncol(Sigma_raw)]
+                  },
 
-  x <- MASS::mvrnorm(1, mu, Sigma) # simulate from mvnorm (does not sum to 1) and length k
-  p <- exp(x)/(1 + sum(exp(x))) # do additive transformation length k and does not sum to 1
-  p <- c(p, 1 - sum(p)) # output now so it sums to 1
+                  `5` = {
+                    Sigma_raw <- kronecker(
+                      kronecker(
+                        get_AR1_CorrMat(n_ages, pars[2]),
+                        get_Constant_CorrMat(n_sexes, pars[3])
+                      ),
+                      get_Constant_CorrMat(n_regions, pars[4])
+                    ) * pars[1]^2
+                    Sigma_raw[-nrow(Sigma_raw), -ncol(Sigma_raw)]
+                  },
+
+                  stop("Unsupported comp_like type")
+  )
+
+  # simulate and transform back to proportions
+  x <- MASS::mvrnorm(1, mu, Sigma)
+  p <- exp(x)/(1 + sum(exp(x)))
+  p <- c(p, 1 - sum(p))
 
   return(p)
 }
 
 
-#' Title Simulate dirichlet multinomial draws
+#' Simulate dirichlet multinomial draws
 #'
 #' @param n Number of sims
 #' @param N Sum of observations
@@ -73,7 +81,7 @@ rdirM <- function(n, N, alpha) {
   return(result)
 }
 
-#' Title Generate Recruitment Values based on Inverse Gaussian Distribution
+#' Generate Recruitment Values based on Inverse Gaussian Distribution
 #'
 #' @param sims Number of Simulations
 #' @param recruitment Recruitment vector
@@ -84,24 +92,28 @@ rinvgauss_rec <- function(sims,
                           recruitment
                           ) {
 
-  AMeanRec <- mean(recruitment) # get arithmetic mean recruitment
-  HMeanRec <- 1 / mean(1 / recruitment) # get harmonic mean recruitment
+  # calculate arithmetic and harmonic means of recruitment
+  a_mean = mean(recruitment)
+  h_mean = 1 / mean(1 / recruitment)
 
-  # define parameters for inverse gaussian
-  gamma <- AMeanRec / HMeanRec
-  gi_beta <- AMeanRec
-  delta <- 1 / (gamma - 1)
-  cvrec <- sqrt(1 / delta)
+  # calculate dispersion parameter based on ratio of means
+  gamma = a_mean / h_mean
+  delta = 1 / (gamma - 1)
+  cv = sqrt(1 / delta)
 
-  # Generate random variables with transformation
-  psi <- stats::rnorm(sims,0,1)^2 # generate squared random normal
-  omega <- gi_beta * (1 + (psi - sqrt(4 * delta * psi + psi^2)) / (2 * delta))
-  zeta <- gi_beta * (1 + (psi + sqrt(4 * delta * psi + psi^2)) / (2 * delta))
-  gtheta <- gi_beta / (gi_beta + omega)
+  # generate standard normal squared for transformation
+  psi = stats::rnorm(sims)^2
 
-  unifs <- stats::runif(sims) # generate uniform
-  rv <- ifelse(unifs <= gtheta, omega, zeta) # generate random draws based on mixture
+  # inverse Gaussian transformation components
+  term = sqrt(4 * delta * psi + psi^2)
+  omega = a_mean * (1 + (psi - term) / (2 * delta))
+  zeta  = a_mean * (1 + (psi + term) / (2 * delta))
+
+  # probability mixture for inverse Gaussian
+  gtheta = a_mean / (a_mean + omega)
+  rv = ifelse(runif(sims) <= gtheta, omega, zeta)
 
   return(rv)
+
 }
 
